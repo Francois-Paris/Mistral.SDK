@@ -4,6 +4,7 @@ using Mistral.SDK.Converters;
 
 namespace Mistral.SDK.DTOs
 {
+    [JsonConverter(typeof(ChatMessageJsonConverter))]
     public class ChatMessage
     {
         /// <summary>
@@ -75,11 +76,19 @@ namespace Mistral.SDK.DTOs
 
         [JsonPropertyName("name")]
         public string Name { get; set; }
+
         /// <summary>
         /// Gets or Sets Content
         /// </summary>
         [JsonPropertyName("content")]
         public string Content { get; set; }
+
+        /// <summary>
+        /// Gets or sets the list of content chunks associated with the chat message.
+        /// </summary>
+        /// <remarks>Not serialized directly (the converter handles this).</remarks>
+        [JsonIgnore]
+        public List<ChatMessageContentChunk>? ContentChunks { get; set; }
 
         [JsonPropertyName("tool_calls")]
         public List<ToolCall> ToolCalls { get; set; }
