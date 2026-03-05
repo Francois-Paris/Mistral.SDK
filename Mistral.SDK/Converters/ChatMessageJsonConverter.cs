@@ -6,6 +6,25 @@ using Mistral.SDK.DTOs;
 
 namespace Mistral.SDK.Converters
 {
+    /// <summary>
+    /// JSON converter for <see cref="DTOs.ChatMessage"/> that supports both the legacy and multimodal
+    /// representations of the <c>content</c> field used by the Mistral Chat Completions API.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Historically, the SDK modeled <c>content</c> as a simple string. Vision / multimodal requests require
+    /// <c>content</c> to be an array of typed chunks (e.g. <c>{"type":"text"}</c>, <c>{"type":"image_url"}</c>).
+    /// This converter keeps backward compatibility by serializing <see cref="DTOs.ChatMessage.Content"/> as a string
+    /// when no chunks are present, and serializing <see cref="DTOs.ChatMessage.ContentChunks"/> as a JSON array otherwise.
+    /// </para>
+    /// <para>
+    /// On deserialization, it accepts both shapes:
+    /// <list type="bullet">
+    ///   <item><description><c>"content": "…"</c></description></item>
+    ///   <item><description><c>"content": [ { … }, { … } ]</c></description></item>
+    /// </list>
+    /// </para>
+    /// </remarks>
     public sealed class ChatMessageJsonConverter : JsonConverter<ChatMessage>
     {
         public override ChatMessage Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
