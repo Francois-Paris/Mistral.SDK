@@ -160,6 +160,12 @@ namespace Mistral.SDK
                         "Mistral had an internal server error, which can happen occasionally.  Please retry your request.  " +
                         GetErrorMessage(resultAsString, response, url, url));
                 }
+                else if (response.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable)
+                {
+                    throw new HttpRequestException(
+                        "Mistral had a service unavailable, which can happen occasionally.  Please retry your request.  " +
+                        GetErrorMessage(resultAsString, response, url, url));
+                }
                 else
                 {
                     throw new HttpRequestException(GetErrorMessage(resultAsString, response, url, url));

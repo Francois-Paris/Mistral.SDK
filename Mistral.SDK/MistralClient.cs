@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json.Serialization;
 using System.Text.Json;
 using Mistral.SDK.Completions;
+using Mistral.SDK.Conversations;
 using Mistral.SDK.Embeddings;
 using Mistral.SDK.Models;
 
@@ -51,6 +52,7 @@ namespace Mistral.SDK
             Completions = new CompletionsEndpoint(this);
             Models = new ModelsEndpoint(this);
             Embeddings = new EmbeddingsEndpoint(this);
+            Conversations = new ConversationsEndpoint(this);
         }
 
         internal static JsonSerializerOptions JsonSerializationOptions { get; } = new()
@@ -91,6 +93,12 @@ namespace Mistral.SDK
         /// Gets model embeddings via API.
         /// </summary>
         public EmbeddingsEndpoint Embeddings { get; }
+
+        /// <summary>
+        /// The Conversations API (<c>/v1/conversations</c>), hosting built-in server-side connectors
+        /// such as web search.
+        /// </summary>
+        public ConversationsEndpoint Conversations { get; }
 
 
         #region IDisposable

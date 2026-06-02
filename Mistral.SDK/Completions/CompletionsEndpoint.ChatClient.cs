@@ -19,6 +19,10 @@ namespace Mistral.SDK.Completions
         async Task<ChatResponse> IChatClient.GetResponseAsync(
             IEnumerable<Microsoft.Extensions.AI.ChatMessage> messages, ChatOptions options, CancellationToken cancellationToken)
         {
+            // Web search lives on /v1/conversations, not /v1/chat/completions — route there when requested.
+            if (WantsWebSearch(options))
+                return await GetWebSearchResponseAsync(messages, options, cancellationToken).ConfigureAwait(false);
+
             var response = await GetCompletionAsync(CreateRequest(messages, options), cancellationToken).ConfigureAwait(false);
 
             Microsoft.Extensions.AI.ChatMessage message = new(ChatRole.Assistant, ProcessResponseContent(response))
@@ -49,6 +53,14 @@ namespace Mistral.SDK.Completions
         async IAsyncEnumerable<ChatResponseUpdate> IChatClient.GetStreamingResponseAsync(
             IEnumerable<Microsoft.Extensions.AI.ChatMessage> messages, ChatOptions options, [EnumeratorCancellation] CancellationToken cancellationToken)
         {
+            // Web search lives on /v1/conversations, not /v1/chat/completions — route there when requested.
+            if (WantsWebSearch(options))
+            {
+                await foreach (var update in GetWebSearchStreamingAsync(messages, options, cancellationToken).WithCancellation(cancellationToken).ConfigureAwait(false))
+                    yield return update;
+                yield break;
+            }
+
             await foreach (var response in StreamCompletionAsync(CreateRequest(messages, options), cancellationToken).WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 foreach (var choice in response.Choices)
