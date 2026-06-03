@@ -39,12 +39,7 @@ namespace Mistral.SDK.Completions
 
             if (response.Usage is { } usage)
             {
-                completion.Usage = new UsageDetails()
-                {
-                    InputTokenCount = usage.PromptTokens,
-                    OutputTokenCount = usage.CompletionTokens,
-                    TotalTokenCount = usage.TotalTokens
-                };
+                completion.Usage = ToUsageDetails(usage);
             }
 
             return completion;
@@ -79,7 +74,22 @@ namespace Mistral.SDK.Completions
                         _ => ChatFinishReason.Stop
                     };
 
-                    var update = new ChatResponseUpdate(role, choice.Delta?.Content)
+                    // Delta peut être :
+                    //  - une string (path classique non-reasoning)  -> on émet 1 TextContent
+                    //  - un tableau de chunks (path reasoning, e.g. mistral-medium-3-5) -> on émet
+                    //    TextReasoningContent pour les chunks "thinking" et TextContent pour les "text"
+                    var deltaContents = new List<AIContent>();
+                    if (choice.Delta?.ContentChunks is { Count: > 0 } deltaChunks)
+                    {
+                        foreach (var chunk in deltaChunks)
+                            AppendChunkAsAIContent(deltaContents, chunk);
+                    }
+                    else if (!string.IsNullOrEmpty(choice.Delta?.Content))
+                    {
+                        deltaContents.Add(new Microsoft.Extensions.AI.TextContent(choice.Delta.Content));
+                    }
+
+                    var update = new ChatResponseUpdate(role, deltaContents)
                     {
                         MessageId = response.Id,
                         ModelId = response.Model,
@@ -114,12 +124,7 @@ namespace Mistral.SDK.Completions
                     {
                         Contents = new List<AIContent>()
                         {
-                            new UsageContent(new UsageDetails()
-                            {
-                                InputTokenCount = usage.PromptTokens,
-                                OutputTokenCount = usage.CompletionTokens,
-                                TotalTokenCount = usage.TotalTokens
-                            })
+                            new UsageContent(ToUsageDetails(usage))
                         },
                         MessageId = response.Id,
                         ModelId = response.Model,
@@ -164,6 +169,20 @@ namespace Mistral.SDK.Completions
                                 {
                                     Type = "text",
                                     Text = tc.Text
+                                });
+                                break;
+
+                            case Microsoft.Extensions.AI.TextReasoningContent trc when !string.IsNullOrEmpty(trc.Text):
+                                // Replay multi-turn : la doc Mistral précise que stripper le bloc thinking dégrade
+                                // significativement la qualité, il faut le renvoyer dans l'historique. On le sérialise
+                                // dans la shape canonique (sous-tableau avec un chunk text imbriqué).
+                                (chunks ??= []).Add(new DTOs.ChatMessageContentChunk
+                                {
+                                    Type = "thinking",
+                                    Thinking = new List<DTOs.ChatMessageContentChunk>
+                                    {
+                                        new DTOs.ChatMessageContentChunk { Type = "text", Text = trc.Text }
+                                    }
                                 });
                                 break;
 
@@ -316,6 +335,7 @@ namespace Mistral.SDK.Completions
             request.MaxTokens ??= options?.MaxOutputTokens;
             request.ParallelToolCalls = options?.AllowMultipleToolCalls ?? request.ParallelToolCalls;
             request.RandomSeed ??= (int?)options?.Seed;
+            request.ReasoningEffort ??= ToMistralReasoningEffort(options?.Reasoning?.Effort);
 
             if (options?.ResponseFormat is ChatResponseFormatJson)
             {
@@ -395,10 +415,21 @@ namespace Mistral.SDK.Completions
 
             foreach (var content in response.Choices)
             {
-                if (content.Message.ToolCalls is not null)
+                // Pour les modèles de reasoning (mistral-medium-3-5, mistral-small-* avec reasoning_effort),
+                // le `content` du message est un tableau de chunks (text + thinking) au lieu d'une string.
+                // Le ChatMessageJsonConverter peuple alors ContentChunks et laisse Content vide.
+                if (content.Message.ContentChunks is { Count: > 0 } chunks)
+                {
+                    foreach (var chunk in chunks)
+                        AppendChunkAsAIContent(contents, chunk);
+                }
+                else if (!string.IsNullOrEmpty(content.Message.Content))
                 {
                     contents.Add(new Microsoft.Extensions.AI.TextContent(content.Message.Content));
+                }
 
+                if (content.Message.ToolCalls is not null)
+                {
                     foreach (var toolCall in content.Message.ToolCalls)
                     {
                         Dictionary<string, object> arguments = null;
@@ -413,14 +444,52 @@ namespace Mistral.SDK.Completions
                             arguments));
                     }
                 }
-                else
-                {
-                    contents.Add(new Microsoft.Extensions.AI.TextContent(content.Message.Content));
-                }
             }
 
             return contents;
         }
+
+        /// <summary>
+        /// Convertit un chunk Mistral en <see cref="AIContent"/> MEAI. Géré : <c>"text"</c> -> <see cref="Microsoft.Extensions.AI.TextContent"/>,
+        /// <c>"thinking"</c> -> <see cref="TextReasoningContent"/>. Les autres types (image/document) ne sont
+        /// pas réémis ici (la lecture multimodale côté réponse n'est pas pertinente pour l'instant).
+        /// </summary>
+        internal static void AppendChunkAsAIContent(List<AIContent> contents, ChatMessageContentChunk chunk)
+        {
+            if (chunk is null) return;
+            switch (chunk.Type)
+            {
+                case "text":
+                    if (!string.IsNullOrEmpty(chunk.Text))
+                        contents.Add(new Microsoft.Extensions.AI.TextContent(chunk.Text));
+                    break;
+
+                case "thinking":
+                    // Shape canonique : {"type":"thinking", "thinking":[{"type":"text","text":"…"}]}
+                    // Fallback défensif : {"type":"thinking", "text":"…"} (au cas où l'API évolue).
+                    string reasoningText = chunk.Thinking is { Count: > 0 }
+                        ? string.Concat(System.Linq.Enumerable.Select(chunk.Thinking, c => c?.Text ?? string.Empty))
+                        : (chunk.Text ?? string.Empty);
+                    if (!string.IsNullOrEmpty(reasoningText))
+                        contents.Add(new TextReasoningContent(reasoningText));
+                    break;
+            }
+        }
+
+        /// <summary>
+        /// Mapping <see cref="ReasoningEffort"/> MEAI -> string Mistral. L'API ne reconnaît que
+        /// <c>"high"</c> ou <c>"none"</c> ; tous les efforts >= Medium remontent à <c>"high"</c>, Low remonte
+        /// à <c>"none"</c> (interprétation prudente : Low = "à peine du reasoning"), None / null -> non envoyé.
+        /// </summary>
+        internal static string? ToMistralReasoningEffort(Microsoft.Extensions.AI.ReasoningEffort? effort) => effort switch
+        {
+            null or Microsoft.Extensions.AI.ReasoningEffort.None => null,
+            Microsoft.Extensions.AI.ReasoningEffort.Low => "none",
+            Microsoft.Extensions.AI.ReasoningEffort.Medium
+                or Microsoft.Extensions.AI.ReasoningEffort.High
+                or Microsoft.Extensions.AI.ReasoningEffort.ExtraHigh => "high",
+            _ => null,
+        };
 
         void IDisposable.Dispose() { }
 

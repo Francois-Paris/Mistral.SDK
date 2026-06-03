@@ -101,7 +101,9 @@ namespace Mistral.SDK.Completions
                         break;
 
                     case "message.output.delta":
-                        var (deltaText, referenceUrl) = InterpretDeltaContent(evt.Content);
+                        var (deltaText, referenceUrl, reasoningDelta) = InterpretDeltaContent(evt.Content);
+                        if (!string.IsNullOrEmpty(reasoningDelta))
+                            yield return Update(new TextReasoningContent(reasoningDelta), conversationId, model);
                         if (!string.IsNullOrEmpty(deltaText))
                             yield return Update(new TextContent(deltaText), conversationId, model);
                         TryAddReference(references, seenReferenceUrls, referenceUrl);
@@ -198,27 +200,51 @@ namespace Mistral.SDK.Completions
         }
 
         // message.output.delta `content` is either a plain string (text delta) or a chunk object
-        // ({type:"text",text} or {type:"tool_reference",tool,title,url,...}). Returns the text delta and/or a
-        // citation URL when present.
-        private static (string text, string referenceUrl) InterpretDeltaContent(JsonNode content)
+        // ({type:"text",text}, {type:"tool_reference",tool,title,url,...}, ou
+        //  {type:"thinking",thinking:[{type:"text",text}]} pour les modèles de reasoning).
+        // Returns the text delta, a citation URL, and a reasoning text delta when present.
+        private static (string text, string referenceUrl, string reasoningText) InterpretDeltaContent(JsonNode content)
         {
             if (content is null)
-                return (null, null);
+                return (null, null, null);
 
             if (content is JsonValue value && value.TryGetValue<string>(out var s))
-                return (s, null);
+                return (s, null, null);
 
             if (content is JsonObject obj)
             {
                 string chunkType = obj["type"]?.GetValue<string>();
                 if (chunkType == "text")
-                    return (obj["text"]?.GetValue<string>(), null);
+                    return (obj["text"]?.GetValue<string>(), null, null);
 
                 if (chunkType == "tool_reference")
-                    return (null, obj["url"]?.GetValue<string>());
+                    return (null, obj["url"]?.GetValue<string>(), null);
+
+                if (chunkType == "thinking")
+                {
+                    // Shape canonique : {"type":"thinking","thinking":[{"type":"text","text":"…"}]} (nested).
+                    // Fallback défensif : {"type":"thinking","text":"…"} (aplati, au cas où l'API évolue).
+                    string reasoning = null;
+                    if (obj["thinking"] is JsonArray nested)
+                    {
+                        var sb = new System.Text.StringBuilder();
+                        foreach (var node in nested)
+                        {
+                            string innerText = node?["text"]?.GetValue<string>();
+                            if (!string.IsNullOrEmpty(innerText))
+                                sb.Append(innerText);
+                        }
+                        reasoning = sb.ToString();
+                    }
+                    else
+                    {
+                        reasoning = obj["text"]?.GetValue<string>();
+                    }
+                    return (null, null, reasoning);
+                }
             }
 
-            return (null, null);
+            return (null, null, null);
         }
 
         // function.call.delta streams the call's arguments across several events. Accumulate per output_index,
@@ -326,6 +352,8 @@ namespace Mistral.SDK.Completions
                     Temperature = (decimal?)options?.Temperature,
                     TopP = (decimal?)options?.TopP,
                     MaxTokens = options?.MaxOutputTokens,
+                    // Cf. ToMistralReasoningEffort (CompletionsEndpoint.ChatClient.cs) : mapping commun avec le path /chat/completions.
+                    ReasoningEffort = ToMistralReasoningEffort(options?.Reasoning?.Effort),
                 },
             };
 
@@ -397,6 +425,13 @@ namespace Mistral.SDK.Completions
                                 Result = result.Result?.ToString() ?? string.Empty,
                             });
                             break;
+
+                        // TextReasoningContent : pas replayé ici. Le path /chat/completions le fait via
+                        // un chunk "thinking" dans Content; sur /v1/conversations, ConversationInputEntry.Content
+                        // est un string scalaire, donc impossible d'envoyer un tableau de chunks sans rendre la
+                        // structure polymorphe. La doc Mistral note que ne PAS replayer dégrade la qualité
+                        // multi-turn — limitation acceptée pour le cas mixte (reasoning + web search).
+                        // TODO: polymorphiser ConversationInputEntry.Content (string | array<chunk>) si besoin.
                     }
                 }
 
@@ -452,6 +487,15 @@ namespace Mistral.SDK.Completions
                         if (output.Content == null)
                             break;
 
+                        // Reasoning trace (mistral-medium-3-5, etc.). Précède le texte assistant — on l'émet en
+                        // premier pour respecter l'ordre de production.
+                        foreach (var thinkingChunk in output.Content.Thinking)
+                        {
+                            string thinkingText = thinkingChunk.ThinkingText;
+                            if (!string.IsNullOrEmpty(thinkingText))
+                                contents.Add(new TextReasoningContent(thinkingText));
+                        }
+
                         string text = output.Content.AsText();
                         if (!string.IsNullOrEmpty(text))
                             contents.Add(new TextContent(text));
@@ -488,11 +532,29 @@ namespace Mistral.SDK.Completions
             }
         }
 
-        private static UsageDetails ToUsageDetails(Usage usage) => new UsageDetails
+        // Helper shared across both endpoints (chat completions + conversations) via the partial class.
+        // - ReasoningTokenCount : null en pratique. Constat (06/2026, mistral-medium-3-5 avec
+        //   reasoning_effort=high) : Mistral ne sort PAS de compteur séparé. Le reasoning est inclus
+        //   dans completion_tokens, comme Anthropic. Vérifié en posant [JsonExtensionData] sur Usage et
+        //   ConversationStreamEvent puis en inspectant le wire — aucun champ de type reasoning_tokens /
+        //   thinking_tokens n'apparaît. Le helper teste quand même les deux shapes connues
+        //   (top-level reasoning_tokens, completion_tokens_details.reasoning_tokens) au cas où l'API évoluerait.
+        //
+        //   Si on veut absolument une ventilation visible (option 2 abandonnée à l'origine) : tokeniser le
+        //   contenu accumulé dans le TextReasoningContent côté host (Celeste.LLM.ChatWithStreaming.TalkStepAsync,
+        //   variable reasoningContentBuilder) via Celeste.LLM.TokenCounter, et écrire le résultat sur
+        //   usage.Details.ReasoningTokenCount juste avant l'Add() dans infos.UsageDetailsList. Approximatif
+        //   (tokenizer différent de celui de Mistral) mais suffisant pour de l'observabilité — patch ~15 lignes.
+        //
+        // - CachedInputTokenCount : exposé par Mistral sous prompt_tokens_details.cached_tokens
+        //   (sur /v1/chat/completions ; non observé sur /v1/conversations mais lu défensivement aussi).
+        internal static UsageDetails ToUsageDetails(Usage usage) => new UsageDetails
         {
             InputTokenCount = usage.PromptTokens,
             OutputTokenCount = usage.CompletionTokens,
             TotalTokenCount = usage.TotalTokens,
+            ReasoningTokenCount = usage.GetReasoningTokens(),
+            CachedInputTokenCount = usage.GetCachedInputTokens(),
         };
     }
 }

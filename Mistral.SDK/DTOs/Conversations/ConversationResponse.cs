@@ -59,7 +59,8 @@ namespace Mistral.SDK.DTOs.Conversations
 
     /// <summary>
     /// A message-output content. The wire shape is polymorphic — either a bare string, or an array of
-    /// chunks (<c>text</c> and <c>tool_reference</c>) — so a custom converter normalizes both into <see cref="Chunks"/>.
+    /// chunks (<c>text</c>, <c>tool_reference</c>, <c>thinking</c>) — so a custom converter normalizes them
+    /// all into <see cref="Chunks"/>.
     /// </summary>
     [JsonConverter(typeof(ConversationContentConverter))]
     public class ConversationContent
@@ -73,11 +74,15 @@ namespace Mistral.SDK.DTOs.Conversations
         /// <summary>The <c>tool_reference</c> chunks (web-search citations).</summary>
         public IEnumerable<ConversationContentChunk> References =>
             Chunks.Where(c => c.Type == "tool_reference");
+
+        /// <summary>The <c>thinking</c> chunks (reasoning trace) when the model is a native reasoning model.</summary>
+        public IEnumerable<ConversationContentChunk> Thinking =>
+            Chunks.Where(c => c.Type == "thinking");
     }
 
     public class ConversationContentChunk
     {
-        /// <summary><c>text</c> or <c>tool_reference</c>.</summary>
+        /// <summary><c>text</c>, <c>tool_reference</c>, or <c>thinking</c>.</summary>
         [JsonPropertyName("type")]
         public string Type { get; set; }
 
@@ -93,6 +98,19 @@ namespace Mistral.SDK.DTOs.Conversations
 
         [JsonPropertyName("source")]
         public string Source { get; set; }
+
+        /// <summary>
+        /// Reasoning trace for <c>type:"thinking"</c> chunks. Shape canonique :
+        /// <c>{"type":"thinking", "thinking":[{"type":"text","text":"…"}]}</c>.
+        /// </summary>
+        [JsonPropertyName("thinking")]
+        public List<ConversationContentChunk> ThinkingChunks { get; set; }
+
+        /// <summary>Extrait le texte d'un chunk <c>thinking</c> (nested ou aplati en fallback).</summary>
+        public string ThinkingText =>
+            ThinkingChunks is { Count: > 0 }
+                ? string.Concat(ThinkingChunks.Where(c => c?.Text != null).Select(c => c.Text))
+                : (Text ?? string.Empty);
     }
 
     /// <summary>
@@ -144,6 +162,13 @@ namespace Mistral.SDK.DTOs.Conversations
 
         [JsonPropertyName("code")]
         public int? Code { get; set; }
+
+        /// <summary>
+        /// Capture tous les champs JSON de l'événement SSE qui ne sont pas explicitement mappés ci-dessus.
+        /// Utile pour diagnostiquer un compteur de reasoning placé au niveau événement (et non sous <c>usage</c>).
+        /// </summary>
+        [JsonExtensionData]
+        public Dictionary<string, JsonElement> ExtensionData { get; set; }
     }
 
     /// <summary>

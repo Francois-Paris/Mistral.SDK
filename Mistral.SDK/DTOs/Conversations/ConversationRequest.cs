@@ -131,5 +131,18 @@ namespace Mistral.SDK.DTOs.Conversations
 
         [JsonPropertyName("max_tokens")]
         public int? MaxTokens { get; set; }
+
+        /// <summary>
+        /// Reasoning effort sur l'endpoint /v1/conversations (mêmes valeurs que sur /chat/completions :
+        /// <c>"high"</c> ou <c>"none"</c>).
+        /// </summary>
+        [JsonPropertyName("reasoning_effort")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? ReasoningEffort { get; set; }
+
+        /// <summary>Prompt mode (<c>"reasoning"</c> active le prompt système de raisonnement par défaut).</summary>
+        [JsonPropertyName("prompt_mode")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? PromptMode { get; set; }
     }
 }

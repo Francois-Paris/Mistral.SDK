@@ -112,7 +112,21 @@ namespace Mistral.SDK.DTOs
         [JsonPropertyName("response_format")]
         public ResponseFormat ResponseFormat { get; set; }
 
-        
+        /// <summary>
+        /// Reasoning effort for native reasoning models (e.g. mistral-medium-3-5, mistral-small-*).
+        /// Mistral n'accepte que <c>"high"</c> ou <c>"none"</c> (pas Low/Medium séparés).
+        /// Cf. https://docs.mistral.ai/studio-api/conversations/reasoning
+        /// </summary>
+        [JsonPropertyName("reasoning_effort")]
+        public string? ReasoningEffort { get; set; }
+
+        /// <summary>
+        /// Prompt mode. Pour activer le prompt système de raisonnement par défaut : <c>"reasoning"</c>.
+        /// </summary>
+        [JsonPropertyName("prompt_mode")]
+        public string? PromptMode { get; set; }
+
+
         [JsonPropertyName("tool_choice")]
         [JsonConverter(typeof(ToolChoiceTypeConverter))]
         public ToolChoiceType ToolChoice { get; set; } = ToolChoiceType.none;
