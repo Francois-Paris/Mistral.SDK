@@ -126,6 +126,17 @@ namespace Mistral.SDK.DTOs
         [JsonPropertyName("prompt_mode")]
         public string? PromptMode { get; set; }
 
+        /// <summary>
+        /// Opt-in du prompt caching (https://docs.mistral.ai/studio-api/conversations/advanced/prompt-caching) :
+        /// identifiant applicatif STABLE (id de conversation / session / workflow — jamais un secret).
+        /// Quand il est posé, Mistral met le préfixe du prompt en cache par blocs de 64 tokens et
+        /// rapporte la réutilisation dans <c>usage.prompt_tokens_details.cached_tokens</c>
+        /// (cf. <see cref="Usage.GetCachedInputTokens"/>), facturée à 10 % du prix d'input.
+        /// Null (défaut) = pas de caching — le champ n'est alors pas sérialisé (WhenWritingNull global).
+        /// </summary>
+        [JsonPropertyName("prompt_cache_key")]
+        public string? PromptCacheKey { get; set; }
+
 
         [JsonPropertyName("tool_choice")]
         [JsonConverter(typeof(ToolChoiceTypeConverter))]

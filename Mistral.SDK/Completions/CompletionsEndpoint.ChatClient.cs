@@ -16,6 +16,21 @@ namespace Mistral.SDK.Completions
     {
         private static readonly Regex s_validFunctionCallIdRegex = new("^[a-zA-Z0-9]{9}$");
 
+        /// <summary>
+        /// Clé de <c>ChatOptions.AdditionalProperties</c> relayant l'identifiant de prompt caching
+        /// (M.E.AI n'a pas de propriété dédiée). Valeur attendue : un identifiant applicatif stable
+        /// et non sensible (id de conversation / session) — voir
+        /// <see cref="ChatCompletionRequest.PromptCacheKey"/>. Honorée par les deux chemins
+        /// (/v1/chat/completions et /v1/conversations).
+        /// </summary>
+        public const string PromptCacheKeyOption = "prompt_cache_key";
+
+        /// <summary>Lit l'identifiant de prompt caching posé par l'appelant dans les options, ou null.</summary>
+        internal static string GetPromptCacheKey(ChatOptions options) =>
+            options?.AdditionalProperties?.TryGetValue(PromptCacheKeyOption, out object value) == true
+                && value is string key && !string.IsNullOrWhiteSpace(key)
+                ? key : null;
+
         async Task<ChatResponse> IChatClient.GetResponseAsync(
             IEnumerable<Microsoft.Extensions.AI.ChatMessage> messages, ChatOptions options, CancellationToken cancellationToken)
         {
@@ -336,6 +351,7 @@ namespace Mistral.SDK.Completions
             request.ParallelToolCalls = options?.AllowMultipleToolCalls ?? request.ParallelToolCalls;
             request.RandomSeed ??= (int?)options?.Seed;
             request.ReasoningEffort ??= ToMistralReasoningEffort(options?.Reasoning?.Effort);
+            request.PromptCacheKey ??= GetPromptCacheKey(options);
 
             if (options?.ResponseFormat is ChatResponseFormatJson)
             {

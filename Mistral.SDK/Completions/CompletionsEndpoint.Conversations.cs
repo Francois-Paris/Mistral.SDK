@@ -343,6 +343,11 @@ namespace Mistral.SDK.Completions
         private static ConversationRequest CreateConversationRequest(
             IEnumerable<Microsoft.Extensions.AI.ChatMessage> messages, ChatOptions options)
         {
+            // Prompt caching : la clé éventuellement posée dans ChatOptions (PromptCacheKeyOption)
+            // est DÉLIBÉRÉMENT ignorée ici — /v1/conversations rejette prompt_cache_key en 422
+            // extra_forbidden (top-level ET completion_args, testé le 2026-08-06). Seul
+            // /v1/chat/completions l'honore ; l'appelant qui veut du caching avec web search doit
+            // attendre que Mistral l'ouvre sur cet endpoint.
             var request = new ConversationRequest
             {
                 Model = options?.ModelId,

@@ -41,6 +41,13 @@ namespace Mistral.SDK.DTOs.Conversations
         /// </summary>
         [JsonPropertyName("store")]
         public bool Store { get; set; }
+
+        // NOTE prompt caching : /v1/conversations ne supporte PAS prompt_cache_key — l'endpoint
+        // répond 422 extra_forbidden, aussi bien au top-level que dans completion_args (les deux
+        // positions testées le 2026-08-06 ; ProviderPromptCacheTests.Mistral_ConversationsPath_*
+        // côté Celeste garde la non-régression). Le champ n'existe que sur /v1/chat/completions
+        // (ChatCompletionRequest.PromptCacheKey) ; ce path-ci ignore silencieusement la clé posée
+        // dans ChatOptions — voir CreateConversationRequest.
     }
 
     /// <summary>
@@ -144,5 +151,8 @@ namespace Mistral.SDK.DTOs.Conversations
         [JsonPropertyName("prompt_mode")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string? PromptMode { get; set; }
+
+        // NOTE : prompt_cache_key n'est PAS un completion_arg — l'endpoint le rejette ici
+        // (422 extra_forbidden, vérifié le 2026-08-06). Voir ConversationRequest.PromptCacheKey (top-level).
     }
 }
