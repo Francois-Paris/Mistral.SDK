@@ -17,6 +17,30 @@ namespace Mistral.SDK.Completions
         private static readonly Regex s_validFunctionCallIdRegex = new("^[a-zA-Z0-9]{9}$");
 
         /// <summary>
+        /// Returns the id itself when it already matches Mistral's nine-[a-zA-Z0-9] format, otherwise
+        /// a DETERMINISTIC 9-char alphanumeric id derived from it (SHA-256 based). Determinism is the
+        /// contract: the same source id always maps to the same value, within a request (assistant
+        /// tool_calls stay paired with their tool results) and across turns (a re-serialized history
+        /// produces the same remapped ids).
+        /// </summary>
+        private static string NormalizeFunctionCallId(string id)
+        {
+            if (id is null || s_validFunctionCallIdRegex.IsMatch(id))
+                return id;
+
+            // SHA256.Create()/ComputeHash, not the static SHA256.HashData: the latter is .NET 5+
+            // and this project also targets netstandard2.0.
+            byte[] hash;
+            using (var sha256 = System.Security.Cryptography.SHA256.Create())
+                hash = sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(id));
+            const string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+            var chars = new char[9];
+            for (int i = 0; i < chars.Length; i++)
+                chars[i] = alphabet[hash[i] % alphabet.Length];
+            return new string(chars);
+        }
+
+        /// <summary>
         /// Clé de <c>ChatOptions.AdditionalProperties</c> relayant l'identifiant de prompt caching
         /// (M.E.AI n'a pas de propriété dédiée). Valeur attendue : un identifiant applicatif stable
         /// et non sensible (id de conversation / session) — voir
@@ -71,6 +95,13 @@ namespace Mistral.SDK.Completions
                 yield break;
             }
 
+            // Streaming tool calls are ACCUMULATED here and only emitted complete: Mistral's own
+            // models ship each call whole in a single delta, but OpenAI-style backends of La
+            // Plateforme (GLM 5.2 via vLLM) fragment the JSON arguments across several deltas —
+            // parsing them per-delta threw JsonException on fragments like '{"query": "'
+            // (observed 2026-08-21 on the Celeste chat path).
+            SortedDictionary<int, PendingStreamingToolCall> pendingToolCalls = null;
+
             await foreach (var response in StreamCompletionAsync(CreateRequest(messages, options), cancellationToken).WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 foreach (var choice in response.Choices)
@@ -115,19 +146,18 @@ namespace Mistral.SDK.Completions
 
                     if (choice.Delta?.ToolCalls is { Count: > 0 })
                     {
+                        pendingToolCalls ??= new SortedDictionary<int, PendingStreamingToolCall>();
                         foreach (var toolCall in choice.Delta.ToolCalls)
-                        {
-                            Dictionary<string, object> arguments = null;
-                            if (toolCall.Function.Arguments is not null)
-                            {
-                                arguments = JsonSerializer.Deserialize<Dictionary<string, object>>(toolCall.Function.Arguments.ToString());
-                            }
+                            AccumulateToolCallDelta(pendingToolCalls, toolCall);
+                    }
 
-                            update.Contents.Add(new FunctionCallContent(
-                                toolCall.Id,
-                                toolCall.Function.Name,
-                                arguments));
-                        }
+                    // Emit the accumulated calls once the provider marks the end of the message
+                    // (raw finish_reason present — update.FinishReason is unusable here: the switch
+                    // above defaults every delta to Stop).
+                    if (choice.FinishReason is not null && pendingToolCalls is { Count: > 0 })
+                    {
+                        foreach (var functionCall in DrainPendingToolCalls(pendingToolCalls))
+                            update.Contents.Add(functionCall);
                     }
 
                     yield return update;
@@ -147,6 +177,74 @@ namespace Mistral.SDK.Completions
                     };
                 }
             }
+
+            // Safety net: a stream that ended without a finish_reason still surfaces its calls.
+            if (pendingToolCalls is { Count: > 0 })
+            {
+                yield return new ChatResponseUpdate(ChatRole.Assistant,
+                    new List<AIContent>(DrainPendingToolCalls(pendingToolCalls)));
+            }
+        }
+
+        /// <summary>One streaming tool call under assembly — see the accumulation note in
+        /// <see cref="IChatClient.GetStreamingResponseAsync"/>.</summary>
+        private sealed class PendingStreamingToolCall
+        {
+            public string Id;
+            public string Name;
+            public readonly System.Text.StringBuilder Arguments = new System.Text.StringBuilder();
+        }
+
+        private static void AccumulateToolCallDelta(SortedDictionary<int, PendingStreamingToolCall> pending, ToolCall toolCall)
+        {
+            // Slot selection: the protocol's "index" when present (OpenAI-style fragmenting);
+            // otherwise a delta carrying an id opens its own slot (Mistral's whole-call-per-delta
+            // shape, incl. parallel calls in one delta), and an id-less, index-less fragment
+            // continues the last opened slot.
+            int key;
+            if (toolCall.Index is int index)
+                key = index;
+            else if (!string.IsNullOrEmpty(toolCall.Id) || pending.Count == 0)
+                key = pending.Count == 0 ? 0 : pending.Keys.Max() + 1;
+            else
+                key = pending.Keys.Max();
+
+            if (!pending.TryGetValue(key, out var entry))
+            {
+                entry = new PendingStreamingToolCall();
+                pending.Add(key, entry);
+            }
+
+            if (!string.IsNullOrEmpty(toolCall.Id))
+                entry.Id = toolCall.Id;
+            if (!string.IsNullOrEmpty(toolCall.Function?.Name))
+                entry.Name = toolCall.Function.Name;
+            if (toolCall.Function?.Arguments is { } fragment)
+            {
+                // vLLM-style fragments arrive as JSON STRINGS holding a piece of the arguments
+                // ('{"query": "'); Mistral ships the whole arguments OBJECT in one delta.
+                string text = fragment is System.Text.Json.Nodes.JsonValue value && value.TryGetValue<string>(out string s)
+                    ? s
+                    : fragment.ToJsonString();
+                entry.Arguments.Append(text);
+            }
+        }
+
+        /// <summary>Parses and returns the completed tool calls (in index order), emptying the map
+        /// so a later flush cannot emit them twice.</summary>
+        private static List<FunctionCallContent> DrainPendingToolCalls(SortedDictionary<int, PendingStreamingToolCall> pending)
+        {
+            var result = new List<FunctionCallContent>(pending.Count);
+            foreach (var entry in pending.Values)
+            {
+                Dictionary<string, object> arguments = null;
+                string json = entry.Arguments.ToString();
+                if (!string.IsNullOrWhiteSpace(json))
+                    arguments = JsonSerializer.Deserialize<Dictionary<string, object>>(json);
+                result.Add(new FunctionCallContent(entry.Id ?? string.Empty, entry.Name, arguments));
+            }
+            pending.Clear();
+            return result;
         }
 
         private ChatCompletionRequest CreateRequest(IEnumerable<Microsoft.Extensions.AI.ChatMessage> chatMessages, ChatOptions options)
@@ -285,25 +383,37 @@ namespace Mistral.SDK.Completions
                     request.Messages.Insert(0, new(DTOs.ChatMessage.RoleEnum.System, systemMessage));
                 }
 
-                // Function call IDs must be in a very specific format, nine [a-zA-Z0-9] characters.
-                // If any aren't, remove them.
+                // Function call IDs must be in a very specific format, nine [a-zA-Z0-9] characters —
+                // but only Mistral's OWN models emit such ids. Third-party models served by La
+                // Plateforme (GLM 5.2 via vLLM) emit longer ids ("chatcmpl-tool-<hex>"): the former
+                // behavior (drop the non-conforming messages) silently REMOVED the whole tool
+                // exchange from the shipped history, so the model kept re-calling the same tool and
+                // never saw a result (observed on zai-glm-5-2, 2026-08-21: 9 identical calls, then
+                // "I don't have access to any tools"). Instead, REMAP every non-conforming id to a
+                // deterministic 9-char one: the assistant tool_call and its tool result derive the
+                // same value, so the pairing — the only thing the model and the API care about —
+                // survives, and it stays stable when the history is re-serialized on later turns.
+                //
+                // Scope note — this is NOT a GLM-specific branch, on purpose:
+                //  - For Mistral's own models the remap is the IDENTITY function (their ids already
+                //    match), so their behavior is unchanged by construction.
+                //  - A Mistral model can legitimately RECEIVE non-Mistral ids in its history: the
+                //    Celeste vision fallback runs the image turn on mistral-medium right after a GLM
+                //    turn whose tool calls (long ids) are persisted in the conversation state. A
+                //    GLM-only fix would reintroduce the drop on that path, on the Mistral side.
                 for (int i = 0; i < request.Messages.Count; i++)
                 {
                     var m = request.Messages[i];
-                    if (m.ToolCallId is not null && !s_validFunctionCallIdRegex.IsMatch(m.ToolCallId))
+                    if (m.ToolCallId is not null)
                     {
-                        request.Messages[i] = null;
+                        m.ToolCallId = NormalizeFunctionCallId(m.ToolCallId);
                     }
-                    else if (m.ToolCalls is { Count: > 0 })
+                    if (m.ToolCalls is { Count: > 0 })
                     {
-                        m.ToolCalls.RemoveAll(static tc => !s_validFunctionCallIdRegex.IsMatch(tc.Id));
-                        if (m.ToolCalls.Count == 0)
-                        {
-                            request.Messages[i] = null;
-                        }
+                        foreach (var toolCall in m.ToolCalls)
+                            toolCall.Id = NormalizeFunctionCallId(toolCall.Id);
                     }
                 }
-                request.Messages.RemoveAll(static m => m is null);
 
                 // User messages should be consolidated so that two user messages don't appear in a row.
                 for (int i = 0; i < request.Messages.Count - 1; i++)
