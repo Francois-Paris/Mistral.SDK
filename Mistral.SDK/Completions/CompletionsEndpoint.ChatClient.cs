@@ -345,12 +345,14 @@ namespace Mistral.SDK.Completions
                     // Send the main message (text or multimodal), with the tool calls of an assistant message.
                     if (toolCalls is { Count: > 0 })
                     {
+                        // A single text chunk keeps the string format; thinking or several chunks go as an array.
+                        // (No list pattern: netstandard2.0 has no System.Index.)
+                        bool loneText = chunks is { Count: 1 } && chunks[0].Type == "text";
                         yield return new DTOs.ChatMessage()
                         {
                             Role = DTOs.ChatMessage.RoleEnum.Assistant,
-                            // A single text chunk keeps the string format; thinking or several chunks go as an array.
-                            Content = chunks is [{ Type: "text" } only] ? only.Text ?? string.Empty : string.Empty,
-                            ContentChunks = chunks is { Count: > 0 } && chunks is not [{ Type: "text" }] ? chunks : null,
+                            Content = loneText ? chunks![0].Text ?? string.Empty : string.Empty,
+                            ContentChunks = chunks is { Count: > 0 } && !loneText ? chunks : null,
                             ToolCalls = toolCalls,
                         };
                     }
