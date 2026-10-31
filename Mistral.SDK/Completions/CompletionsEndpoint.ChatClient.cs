@@ -270,8 +270,14 @@ namespace Mistral.SDK.Completions
                         m.Role == ChatRole.Tool ? DTOs.ChatMessage.RoleEnum.Tool :
                         DTOs.ChatMessage.RoleEnum.User;
 
-                    // We collect all multimodal chunks for this message
+                    // We collect all multimodal chunks for this message, and its tool calls: ONE assistant message
+                    // carries them all (content first, then tool_calls), the shape Mistral itself answers with. One
+                    // message per call, with the thinking in a message of its own after them, is what the API
+                    // refuses with 400 code 3230 "Not the same number of function calls and responses": every
+                    // assistant message that holds tool_calls must be followed by their tool messages (seen on
+                    // mistral-large-4 at reasoning_effort high, whose thinking is replayed, 2026-10-31).
                     List<DTOs.ChatMessageContentChunk>? chunks = null;
+                    List<ToolCall>? toolCalls = null;
 
                     foreach (AIContent content in m.Contents)
                     {
@@ -319,22 +325,15 @@ namespace Mistral.SDK.Completions
                                 break;
 
                             case Microsoft.Extensions.AI.FunctionCallContent fcc:
-                                yield return new DTOs.ChatMessage()
+                                (toolCalls ??= []).Add(new ToolCall()
                                 {
-                                    Role = DTOs.ChatMessage.RoleEnum.Assistant,
-                                    ToolCalls = new List<ToolCall>()
+                                    Id = fcc.CallId,
+                                    Function = new ToolCallParameter()
                                     {
-                                        new ToolCall()
-                                        {
-                                            Id = fcc.CallId,
-                                            Function = new ToolCallParameter()
-                                            {
-                                                Arguments = JsonSerializer.SerializeToNode(fcc.Arguments),
-                                                Name = fcc.Name,
-                                            }
-                                        }
+                                        Arguments = JsonSerializer.SerializeToNode(fcc.Arguments),
+                                        Name = fcc.Name,
                                     }
-                                };
+                                });
                                 break;
 
                             case Microsoft.Extensions.AI.FunctionResultContent frc:
@@ -343,8 +342,19 @@ namespace Mistral.SDK.Completions
                         }
                     }
 
-                    // Send the main message (text or multimodal)
-                    if (chunks is { Count: > 0 })
+                    // Send the main message (text or multimodal), with the tool calls of an assistant message.
+                    if (toolCalls is { Count: > 0 })
+                    {
+                        yield return new DTOs.ChatMessage()
+                        {
+                            Role = DTOs.ChatMessage.RoleEnum.Assistant,
+                            // A single text chunk keeps the string format; thinking or several chunks go as an array.
+                            Content = chunks is [{ Type: "text" } only] ? only.Text ?? string.Empty : string.Empty,
+                            ContentChunks = chunks is { Count: > 0 } && chunks is not [{ Type: "text" }] ? chunks : null,
+                            ToolCalls = toolCalls,
+                        };
+                    }
+                    else if (chunks is { Count: > 0 })
                     {
                         // optimization: if it is only a text chunk, we keep the string format (backward compatible)
                         if (chunks.Count == 1 && chunks[0].Type == "text")
@@ -436,12 +446,15 @@ namespace Mistral.SDK.Completions
                     }
                 }
 
-                // Tool messages must be followed by an assistant message if there's anything next.
+                // Tool messages must be followed by an assistant message if there's anything next — or by the next tool
+                // message of the same round: parallel tool calls answer with as many consecutive tool messages, and an
+                // assistant message slipped between them is a 400 code 3230 "Not the same number of function calls and
+                // responses" (mistral-large-4, two calls in one round, 2026-10-31).
                 for (int i = 0; i < request.Messages.Count; i++)
                 {
                     if (request.Messages[i].Role == DTOs.ChatMessage.RoleEnum.Tool &&
                         i + 1 < request.Messages.Count &&
-                        request.Messages[i + 1].Role != DTOs.ChatMessage.RoleEnum.Assistant)
+                        request.Messages[i + 1].Role is not (DTOs.ChatMessage.RoleEnum.Assistant or DTOs.ChatMessage.RoleEnum.Tool))
                     {
                         request.Messages.Insert(i + 1, new DTOs.ChatMessage(DTOs.ChatMessage.RoleEnum.Assistant, EmptyMessage));
                     }
